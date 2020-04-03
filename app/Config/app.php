@@ -123,6 +123,9 @@ return [
         BookStack\Providers\RouteServiceProvider::class,
         BookStack\Providers\CustomFacadeProvider::class,
         BookStack\Providers\CustomValidationServiceProvider::class,
+
+        // CAS
+        Subfission\Cas\CasServiceProvider::class,
     ],
 
     /*

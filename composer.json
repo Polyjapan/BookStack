@@ -12,6 +12,7 @@
         "ext-json": "*",
         "ext-mbstring": "*",
         "ext-xml": "*",
+        "apereo/phpcas": "1.3.8",
         "barryvdh/laravel-dompdf": "^0.9.0",
         "barryvdh/laravel-snappy": "^0.4.8",
         "doctrine/dbal": "^2.12.1",
@@ -31,7 +32,8 @@
         "socialiteproviders/okta": "^4.1",
         "socialiteproviders/slack": "^4.1",
         "socialiteproviders/twitch": "^5.3",
-        "ssddanbrown/htmldiff": "^v1.0.1"
+        "ssddanbrown/htmldiff": "^v1.0.1",
+        "subfission/cas": ">=3"
     },
     "require-dev": {
         "barryvdh/laravel-debugbar": "^3.5.1",
