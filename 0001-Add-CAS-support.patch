@@ -1,0 +1,426 @@
+From 12e25a63a645cbd6b951616237eb83ccee5b1557 Mon Sep 17 00:00:00 2001
+From: Louis Vialar <louis.vialar@gmail.com>
+Date: Sat, 4 Apr 2020 01:49:52 +0200
+Subject: [PATCH] Add CAS support
+
+---
+ app/Auth/Access/CasService.php                |  80 ++++++++
+ app/Config/app.php                            |   3 +
+ app/Config/auth.php                           |   4 +
+ app/Config/cas.php                            | 178 ++++++++++++++++++
+ app/Http/Controllers/Auth/CasController.php   |  44 +++++
+ composer.json                                 |   3 +-
+ .../views/auth/forms/login/cas.blade.php      |   6 +
+ resources/views/common/header.blade.php       |   2 +
+ routes/web.php                                |   3 +
+ 9 files changed, 322 insertions(+), 1 deletion(-)
+ create mode 100644 app/Auth/Access/CasService.php
+ create mode 100644 app/Config/cas.php
+ create mode 100644 app/Http/Controllers/Auth/CasController.php
+ create mode 100644 resources/views/auth/forms/login/cas.blade.php
+
+diff --git a/app/Auth/Access/CasService.php b/app/Auth/Access/CasService.php
+new file mode 100644
+index 00000000..2ba4cc5c
+--- /dev/null
++++ b/app/Auth/Access/CasService.php
+@@ -0,0 +1,80 @@
++<?php namespace BookStack\Auth\Access;
++
++use BookStack\Auth\User;
++use BookStack\Exceptions\SamlException;
++use BookStack\Exceptions\SocialSignInAccountNotUsed;
++use Illuminate\Support\Str;
++
++class CasService extends ExternalAuthService
++{
++    protected $config;
++    protected $registrationService;
++    protected $user;
++
++    /**
++     * CasService constructor.
++     */
++    public function __construct(RegistrationService $registrationService, User $user)
++    {
++        $this->config = config('cas');
++        $this->registrationService = $registrationService;
++        $this->user = $user;
++    }
++
++    /**
++     * Handle the login process on a CAS callback.
++     * @throws SocialSignInAccountNotUsed
++     */
++    public function handleLoginCallback(string $userName, $attributes)
++    {
++        $isLoggedIn = auth()->check();
++
++        if ($userName === null) {
++            throw new SamlException(trans('errors.saml_no_email_address'));
++        }
++
++        if ($isLoggedIn) {
++            throw new SamlException(trans('errors.saml_already_logged_in'), '/login');
++        }
++
++        // Get or register
++        $user = $this->user->newQuery()
++            ->where('external_auth_id', '=', $userName)
++            ->first();
++
++        print_r($attributes);
++
++        if (is_null($user)) {
++            $userData = [
++                'name' => $attributes['name'],
++                'email' => $userName,
++                'password' => Str::random(32),
++                'external_auth_id' => $userName,
++            ];
++
++            $user = $this->registrationService->registerUser($userData, null, false);
++        }
++
++        // Login
++        if ($user === null) {
++            throw new SamlException(trans('errors.saml_user_not_registered', ['name' => $userDetails['external_id']]), '/login');
++        }
++
++        if ($this->shouldSyncGroups()) {
++            $groups = $attributes['groups'];
++
++            if (!is_array($groups))
++                $groups = array($groups);
++
++            $this->syncWithGroups($user, $groups);
++        }
++
++        auth()->login($user);
++        return $user;
++    }
++
++    protected function shouldSyncGroups(): bool
++    {
++        return $this->config['user_to_groups'] !== false;
++    }
++}
+diff --git a/app/Config/app.php b/app/Config/app.php
+index cf34fd69..5b902e6c 100755
+--- a/app/Config/app.php
++++ b/app/Config/app.php
+@@ -117,6 +117,9 @@ return [
+         BookStack\Providers\EventServiceProvider::class,
+         BookStack\Providers\RouteServiceProvider::class,
+         BookStack\Providers\CustomFacadeProvider::class,
++
++        // CAS
++        Subfission\Cas\CasServiceProvider::class,
+     ],
+ 
+     /*
+diff --git a/app/Config/auth.php b/app/Config/auth.php
+index 51b152ff..780c72be 100644
+--- a/app/Config/auth.php
++++ b/app/Config/auth.php
+@@ -40,6 +40,10 @@ return [
+             'driver' => 'saml2-session',
+             'provider' => 'external',
+         ],
++        'cas' => [
++            'driver' => 'session',
++            'provider' => 'users',
++        ],
+         'api' => [
+             'driver' => 'api-token',
+         ],
+diff --git a/app/Config/cas.php b/app/Config/cas.php
+new file mode 100644
+index 00000000..82f4fd4e
+--- /dev/null
++++ b/app/Config/cas.php
+@@ -0,0 +1,178 @@
++<?php
++return [
++
++    'name' => env('CAS_NAME', 'CAS'),
++
++    // Enable syncing, upon login, of CAS groups to BookStack groups
++    'user_to_groups' => env('CAS_USER_TO_GROUPS', false),
++    // When syncing groups, remove any groups that no longer match. Otherwise sync only adds new groups.
++    'remove_from_groups' => env('CAS_REMOVE_FROM_GROUPS', false),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Hostname
++    |--------------------------------------------------------------------------
++    | Example: 'cas.myuniv.edu'.
++    */
++    'cas_hostname'        => env('CAS_HOSTNAME', 'cas.myuniv.edu'),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Authorized Hosts
++    |--------------------------------------------------------------------------
++    | Example: 'cas.myuniv.edu'.  This is used when SAML is active and is
++    | recommended for protecting against DOS attacks.  If using load
++    | balanced hosts, then separate each with a comma.
++    */
++    'cas_real_hosts'      => env('CAS_REAL_HOSTS', 'cas.myuniv.edu'),
++
++
++    /*
++    |--------------------------------------------------------------------------
++    | Customize CAS Session Cookie Name
++    |--------------------------------------------------------------------------
++    */
++    'cas_session_name'    => env('CAS_SESSION_NAME', 'CASAuth'),
++
++    /*
++    |--------------------------------------------------------------------------
++    | Laravel has it's own authentication sessions. Unless you want phpCAS
++    | to manage the session, leave this set to false.  Note that the
++    | middleware and redirect classes will be handling removal
++    | of the Laravel sessions when this is set to false.
++    |--------------------------------------------------------------------------
++    */
++    'cas_control_session' => env('CAS_CONTROL_SESSIONS', false),
++
++    /*
++    |--------------------------------------------------------------------------
++    | Enable using this as a cas proxy
++    |--------------------------------------------------------------------------
++    */
++    'cas_proxy'           => env('CAS_PROXY', false),
++
++    /*
++    |--------------------------------------------------------------------------
++    | Cas Port
++    |--------------------------------------------------------------------------
++    | Usually 443
++    */
++    'cas_port'            => env('CAS_PORT', 443),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS URI
++    |--------------------------------------------------------------------------
++    | Sometimes is /cas
++    */
++    'cas_uri'             => env('CAS_URI', '/cas'),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Validation
++    |--------------------------------------------------------------------------
++    | CAS server SSL validation: 'self' for self-signed certificate, 'ca' for
++    | certificate from a CA, empty for no SSL validation.
++    |
++    | VALIDATING THE CAS SERVER IS CRUCIAL TO THE SECURITY OF THE CAS PROTOCOL
++    */
++    'cas_validation'          => env('CAS_VALIDATION', ''),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CA Certificate
++    |--------------------------------------------------------------------------
++    | Path to the CA certificate file.  For production use set
++    | the CA certificate that is the issuer of the cert
++    */
++    'cas_cert'                => env('CAS_CERT', ''),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CN Validation (if you are using CA certs)
++    |--------------------------------------------------------------------------
++    | If for some reason you want to disable validating the certificate
++    | intermediaries, here is where you can.  Recommended to leave
++    | this set with default (true).
++    */
++    'cas_validate_cn'     => env('CAS_VALIDATE_CN', true),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Login URI
++    |--------------------------------------------------------------------------
++    | Empty is fine
++    */
++    'cas_login_url'       => env('CAS_LOGIN_URL', ''),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Logout URI
++    |--------------------------------------------------------------------------
++    */
++    'cas_logout_url'      => env('CAS_LOGOUT_URL', 'https://cas.myuniv.edu/cas/logout'),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Logout Redirect Services
++    |--------------------------------------------------------------------------
++    | If your server supports redirection services, enter the redirect url
++    | in this section.  If left blank, it will default to disabled.
++    */
++    'cas_logout_redirect' => env('CAS_LOGOUT_REDIRECT', ''),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Successful Logon Redirection Url
++    |--------------------------------------------------------------------------
++    | By default, CAS will assume that the user should be redirected to the
++    | page in which the call was initiated.  You can override this method
++    | and force the user to be redirected to a specific URL here.
++    */
++    'cas_redirect_path'   => env('CAS_REDIRECT_PATH', ''),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS Supports SAML 1.1, allowing you to retrieve more than just the
++    | user identifier.  If your CAS authentication service supports
++    | this feature, you may be able to retrieve user meta data.
++    |--------------------------------------------------------------------------
++    */
++    'cas_enable_saml'     => env('CAS_ENABLE_SAML', true),
++
++    /*
++    |--------------------------------------------------------------------------
++    | CAS will support version 1.0, 2.0, 3.0 of the protocol.  It is recommended
++    | to use version 2.0, 3.0, or SAML 1.1.  If you enable SAML, then that
++    | will override this configuration.
++    |--------------------------------------------------------------------------
++    */
++    'cas_version'         => env('CAS_VERSION', "2.0"),
++    
++    /*
++    |--------------------------------------------------------------------------
++    | Enable PHPCas Debug Mode
++    | Options are:
++    | 1) true (defaults logfile creation to /tmp/phpCAS.log)
++    | 2) 'path/to/logfile'
++    | 3) false
++    |--------------------------------------------------------------------------
++    */
++    'cas_debug'           => env('CAS_DEBUG', false),
++
++    /*
++    |--------------------------------------------------------------------------
++    | Enable Verbose error messages. Not recommended for production.
++    | true | false
++    |--------------------------------------------------------------------------
++    */
++    'cas_verbose_errors'  => env('CAS_VERBOSE_ERRORS', false),
++
++    /*
++    |--------------------------------------------------------------------------
++    | This will cause CAS to skip authentication and assume this user id.
++    | This should only be used for developmental purposes.  getAttributes()
++    | will return null in this condition.
++     */
++    'cas_masquerade'      => env('CAS_MASQUERADE', '')
++];
+diff --git a/app/Http/Controllers/Auth/CasController.php b/app/Http/Controllers/Auth/CasController.php
+new file mode 100644
+index 00000000..3793699e
+--- /dev/null
++++ b/app/Http/Controllers/Auth/CasController.php
+@@ -0,0 +1,44 @@
++<?php
++
++namespace BookStack\Http\Controllers\Auth;
++
++use BookStack\Auth\Access\CasService;
++use BookStack\Auth\Access\RegistrationService;
++use BookStack\Http\Controllers\Controller;
++use Illuminate\Http\Request;
++
++class CasController extends Controller
++{
++
++    private $casService;
++
++    /**
++     * CasController constructor.
++     */
++    public function __construct(CasService $casService, RegistrationService $registrationService)
++    {
++        $this->casService = $casService;
++    }
++
++    public function login()
++    {
++        if (cas()->isAuthenticated()) {
++            $this->casService->handleLoginCallback(cas()->user(), cas()->getAttributes());
++            return redirect()->intended();
++        } else {
++            cas()->authenticate();
++        }
++    }
++
++    public function logout(Request $request)
++    {
++        auth()->logout();
++
++        $request->session()->invalidate();
++
++        $request->session()->regenerateToken();
++
++        cas()->logout();
++    }
++
++}
+diff --git a/composer.json b/composer.json
+index 6da65189..aa44e928 100644
+--- a/composer.json
++++ b/composer.json
+@@ -31,7 +31,8 @@
+         "socialiteproviders/slack": "^3.0",
+         "socialiteproviders/twitch": "^5.0",
+         "facade/ignition": "^1.4",
+-        "nunomaduro/collision": "^3.0"
++        "nunomaduro/collision": "^3.0",
++        "subfission/cas": ">=3"
+     },
+     "require-dev": {
+         "barryvdh/laravel-debugbar": "^3.2.8",
+diff --git a/resources/views/auth/forms/login/cas.blade.php b/resources/views/auth/forms/login/cas.blade.php
+new file mode 100644
+index 00000000..e4163612
+--- /dev/null
++++ b/resources/views/auth/forms/login/cas.blade.php
+@@ -0,0 +1,6 @@
++<div class="mt-l">
++    <a id="cas-login" class="button outline block svg" href="{{ url('/cas/login') }}">
++        @icon('saml2')
++        {{ trans('auth.log_in_with', ['socialDriver' => config('cas.name')]) }}
++    </a>
++</div>
+diff --git a/resources/views/common/header.blade.php b/resources/views/common/header.blade.php
+index ec90739e..0930a99f 100644
+--- a/resources/views/common/header.blade.php
++++ b/resources/views/common/header.blade.php
+@@ -66,6 +66,8 @@
+                             <li>
+                                 @if(config('auth.method') === 'saml2')
+                                     <a href="{{ url('/saml2/logout') }}">@icon('logout'){{ trans('auth.logout') }}</a>
++                                @elseif(config('auth.method') === 'cas')
++                                    <a href="{{ url('/cas/logout') }}">@icon('logout'){{ trans('auth.logout') }}</a>
+                                 @else
+                                     <a href="{{ url('/logout') }}">@icon('logout'){{ trans('auth.logout') }}</a>
+                                 @endif
+diff --git a/routes/web.php b/routes/web.php
+index 90261e1a..68fd017e 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -226,6 +226,9 @@ Route::post('/register/confirm/resend', 'Auth\ConfirmEmailController@resend');
+ Route::get('/register/confirm/{token}', 'Auth\ConfirmEmailController@confirm');
+ Route::post('/register', 'Auth\RegisterController@postRegister');
+ 
++Route::get('/cas/login', 'Auth\CasController@login');
++Route::get('/cas/logout', 'Auth\CasController@logout');
++
+ // SAML routes
+ Route::post('/saml2/login', 'Auth\Saml2Controller@login');
+ Route::get('/saml2/logout', 'Auth\Saml2Controller@logout');
+-- 
+2.31.1
+
